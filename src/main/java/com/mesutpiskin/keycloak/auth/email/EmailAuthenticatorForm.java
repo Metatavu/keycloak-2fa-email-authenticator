@@ -1,10 +1,12 @@
 package com.mesutpiskin.keycloak.auth.email;
 
 import lombok.extern.jbosslog.JBossLog;
+import org.eclipse.microprofile.config.ConfigProvider;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.AuthenticationFlowException;
 import org.keycloak.authentication.Authenticator;
+import org.keycloak.common.util.SecretGenerator;
 import org.keycloak.email.EmailException;
 import org.keycloak.email.EmailTemplateProvider;
 import org.keycloak.events.Errors;
@@ -20,14 +22,15 @@ import javax.ws.rs.core.Response;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.Objects;
 
 @JBossLog
 public class EmailAuthenticatorForm implements Authenticator {
 
-    static final String ID = "demo-email-code-form";
+    static final String ID = "email-otp-form";
 
-    public static final String EMAIL_CODE = "emailCode";
+    public static final String OTP_CODE = "otpCode";
+    public static final Integer OTP_CODE_LENGTH = ConfigProvider.getConfig().getValue("kc.otp.length", Integer.class);
 
     private final KeycloakSession session;
 
@@ -49,20 +52,20 @@ public class EmailAuthenticatorForm implements Authenticator {
             form.setErrors(List.of(errorMessage));
         }
 
-        Response response = form.createForm("email-code-form.ftl");
+        Response response = form.createForm("otp-code-form.ftl");
         context.challenge(response);
     }
 
     private void generateAndSendEmailCode(AuthenticationFlowContext context) {
 
-        if (context.getAuthenticationSession().getAuthNote(EMAIL_CODE) != null) {
-            // skip sending email code
+        if (context.getAuthenticationSession().getAuthNote(OTP_CODE) != null) {
+             // Skip sending email if Auth Notes already include OTP_CODE which indicates an email has already been sent.
             return;
         }
 
-        int emailCode = ThreadLocalRandom.current().nextInt(99999999);
-        sendEmailWithCode(context.getRealm(), context.getUser(), String.valueOf(emailCode));
-        context.getAuthenticationSession().setAuthNote(EMAIL_CODE, Integer.toString(emailCode));
+        String otpCode = SecretGenerator.getInstance().randomString(OTP_CODE_LENGTH, SecretGenerator.DIGITS);
+        sendEmailWithCode(context.getRealm(), context.getUser(), otpCode);
+        context.getAuthenticationSession().setAuthNote(OTP_CODE, otpCode);
     }
 
     @Override
@@ -80,8 +83,7 @@ public class EmailAuthenticatorForm implements Authenticator {
             return;
         }
 
-        int givenEmailCode = Integer.parseInt(formData.getFirst(EMAIL_CODE));
-        boolean valid = validateCode(context, givenEmailCode);
+        boolean valid = validateCode(context, formData.getFirst(OTP_CODE));
         if (!valid) {
             context.getEvent().error(Errors.INVALID_USER_CREDENTIALS);
             challenge(context, new FormMessage(Messages.INVALID_ACCESS_CODE));
@@ -93,12 +95,11 @@ public class EmailAuthenticatorForm implements Authenticator {
     }
 
     private void resetEmailCode(AuthenticationFlowContext context) {
-        context.getAuthenticationSession().removeAuthNote(EMAIL_CODE);
+        context.getAuthenticationSession().removeAuthNote(OTP_CODE);
     }
 
-    private boolean validateCode(AuthenticationFlowContext context, int givenCode) {
-        int emailCode = Integer.parseInt(context.getAuthenticationSession().getAuthNote(EMAIL_CODE));
-        return givenCode == emailCode;
+    private boolean validateCode(AuthenticationFlowContext context, String givenCode) {
+        return Objects.equals(context.getAuthenticationSession().getAuthNote(OTP_CODE), givenCode);
     }
 
     @Override
@@ -128,7 +129,6 @@ public class EmailAuthenticatorForm implements Authenticator {
         }
 
         Map<String, Object> mailBodyAttributes = new HashMap<>();
-        mailBodyAttributes.put("username", user.getUsername());
         mailBodyAttributes.put("code", code);
 
         String realmName = realm.getDisplayName() != null ? realm.getDisplayName() : realm.getName();
@@ -137,8 +137,9 @@ public class EmailAuthenticatorForm implements Authenticator {
             EmailTemplateProvider emailProvider = session.getProvider(EmailTemplateProvider.class);
             emailProvider.setRealm(realm);
             emailProvider.setUser(user);
+
             // Don't forget to add the welcome-email.ftl (html and text) template to your theme.
-            emailProvider.send("emailCodeSubject", subjectParams, "code-email.ftl", mailBodyAttributes);
+            emailProvider.send("emailCodeSubject", subjectParams, "otp-email.ftl", mailBodyAttributes);
         } catch (EmailException eex) {
             log.errorf(eex, "Failed to send access code email. realm=%s user=%s", realm.getId(), user.getUsername());
         }
